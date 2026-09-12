@@ -188,15 +188,33 @@ class TestFCPXMLGeneration:
             ns = {'fcpxml': FCPXML_NAMESPACE}
             
             # Should have clips
-            clips = root.findall(".//fcpxml:clip", ns)
+            clips = root.findall(".//fcpxml:asset-clip", ns)
             # If namespace doesn't work, try without
             if len(clips) == 0:
-                clips = root.findall(".//clip")
+                clips = root.findall(".//asset-clip")
             assert len(clips) == 2
             
         finally:
             if os.path.exists(output_path):
                 os.unlink(output_path)
+
+    def test_cuts_are_ripple_deleted(self):
+        """The second source range begins at edited offset 5s, not 7s."""
+        media = MediaInfo(path="/tmp/a video.mp4", duration=20.0, width=1920,
+                          height=1080, frame_rate=Fraction(24, 1), sample_rate=48000)
+        with tempfile.NamedTemporaryFile(suffix=".fcpxml", delete=False) as f:
+            output_path = f.name
+        try:
+            generate_fcpxml(media, [Interval(0, 5), Interval(7, 20)], output_path)
+            valid, errors = validate_fcpxml(output_path)
+            assert valid, errors
+            clips = get_clip_info(output_path)
+            assert [(c["offset"], c["start"], c["duration"]) for c in clips] == [
+                ("0/1s", "0/1s", "5/1s"), ("5/1s", "7/1s", "13/1s")]
+            sequence = ET.parse(output_path).getroot().find(".//sequence")
+            assert sequence.get("duration") == "18/1s"
+        finally:
+            os.unlink(output_path)
     
     def test_timeline_from_analysis(self):
         """Test generating FCPXML from AnalysisResult."""
@@ -238,10 +256,10 @@ class TestFCPXMLGeneration:
             ns = {'fcpxml': FCPXML_NAMESPACE}
             
             # Should have clips
-            clips = root.findall(".//fcpxml:clip", ns)
+            clips = root.findall(".//fcpxml:asset-clip", ns)
             # If namespace doesn't work, try without
             if len(clips) == 0:
-                clips = root.findall(".//clip")
+                clips = root.findall(".//asset-clip")
             assert len(clips) == 2
             
         finally:

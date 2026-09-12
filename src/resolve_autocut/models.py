@@ -247,7 +247,9 @@ class Caption:
         idx = index if index is not None else self.index
         start_hms = self._format_time(self.start)
         end_hms = self._format_time(self.end)
-        return f"{idx}\n{start_hms} --> {end_hms}\n{self.text}\n"
+        # SRT cues are separated by a blank line; without it many importers
+        # parse the entire file as one cue.
+        return f"{idx}\n{start_hms} --> {end_hms}\n{self.text}\n\n"
     
     @staticmethod
     def _format_time(seconds: float) -> str:

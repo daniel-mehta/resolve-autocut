@@ -171,6 +171,14 @@ class TestCaptionRemapping:
         # Either behavior is acceptable for now
         assert len(remapped) <= 1
 
+    def test_removed_words_are_not_left_in_caption(self):
+        words = [Word("hello", 0, .4, 0), Word("um", .4, .7, 1), Word("there", .7, 1.1, 2)]
+        captions = [Caption(1, 0, 1.1, "hello um there", [0, 1, 2])]
+        remapped = remap_captions(captions, [Interval(.4, .7)], words)
+        assert [caption.text.lower() for caption in remapped] == ["hello", "there"]
+        assert [caption.start for caption in remapped] == pytest.approx([0, .4])
+        assert [caption.end for caption in remapped] == pytest.approx([.4, .8])
+
 
 class TestCaptionRemappingBatch:
     """Tests for batch caption remapping."""
@@ -229,6 +237,7 @@ class TestSRTGeneration:
         assert "2" in srt
         assert "First caption" in srt
         assert "Second caption" in srt
+        assert len([block for block in srt.strip().split("\n\n") if block]) == 2
     
     def test_time_formatting(self):
         """Test SRT time formatting."""

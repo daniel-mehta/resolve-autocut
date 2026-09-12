@@ -63,8 +63,9 @@ class TestChunkAudioForUHM:
         
         chunks = chunk_audio_for_uhm(audio_data, sample_rate)
         
-        # Should have at least 2 chunks (with 20ms stride, will have many)
-        assert len(chunks) >= 1
+        # UHM receives contiguous 30-second windows, not a 30-second model
+        # invocation every 20 ms.  The tail is a second, short window.
+        assert len(chunks) == 2
         
         # First chunk starts at 0
         assert chunks[0][0] == 0.0
@@ -105,8 +106,7 @@ class TestChunkAudioForUHM:
             if i == 0:
                 assert chunk_start == 0.0
             else:
-                # The stride is 20ms = 0.02s
-                expected_start = chunks[i-1][0] + UHM_STRIDE
+                expected_start = chunks[i-1][1]
                 assert abs(chunk_start - expected_start) < 0.001  # Small tolerance
             
             # Chunk end should be after start

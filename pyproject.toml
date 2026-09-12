@@ -25,6 +25,7 @@ dependencies = [
     # Optional: for audio processing (we primarily use ffmpeg via subprocess)
     "pydub>=0.25.1",
     "scipy>=1.12.0",
+    "soundfile>=0.12.1",
 ]
 
 [project.optional-dependencies]

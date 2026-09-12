@@ -143,7 +143,7 @@ def _clean_caption_text(text: str) -> str:
     return text.strip()
 
 
-def remap_captions(captions: List[Caption], cut_intervals: List[Interval]) -> List[Caption]:
+def remap_captions(captions: List[Caption], cut_intervals: List[Interval], words: Optional[List[Word]] = None) -> List[Caption]:
     """Remap caption timestamps to edited timeline.
     
     This shifts all caption timestamps backward by the cumulative duration of
@@ -162,7 +162,28 @@ def remap_captions(captions: List[Caption], cut_intervals: List[Interval]) -> Li
     if not captions:
         return []
     
-    # Build duration map for efficiency
+    cuts = merge_overlapping(sort_intervals(cut_intervals))
+    # With source words, remove words whose audio was removed and split a
+    # caption at a cut.  This avoids displaying a spoken filler after it has
+    # been ripple-deleted.
+    if words is not None:
+        by_index = {word.index: word for word in words}
+        result = []
+        for caption in captions:
+            run = []
+            for index in caption.source_words:
+                word = by_index.get(index)
+                kept = word is not None and not any(word.start < cut.end and word.end > cut.start for cut in cuts)
+                if kept:
+                    run.append(word)
+                elif run:
+                    result.append(_caption_from_kept_words(caption.index, run, cuts))
+                    run = []
+            if run:
+                result.append(_caption_from_kept_words(caption.index, run, cuts))
+        return [caption for caption in result if caption.end > caption.start]
+
+    # Legacy callers without words cannot safely rewrite caption text.
     duration_map = build_duration_map(cut_intervals)
     
     result = []
@@ -172,6 +193,22 @@ def remap_captions(captions: List[Caption], cut_intervals: List[Interval]) -> Li
             result.append(new_caption)
     
     return result
+
+
+def _caption_from_kept_words(index: int, words: List[Word], cuts: List[Interval]) -> Caption:
+    start = map_timestamp_simple(words[0].start, cuts)
+    end = map_timestamp_simple(words[-1].end, cuts)
+    # Half-open cuts include their start but a kept word may legitimately end
+    # exactly there.  Map that boundary to the beginning of the ripple gap.
+    if end is None:
+        for cut in cuts:
+            if abs(words[-1].end - cut.start) < 1e-9:
+                end = cut.start - sum(previous.duration for previous in cuts if previous.end <= cut.start)
+                break
+    assert start is not None and end is not None
+    return Caption(index=index, start=start, end=end,
+                   text=_clean_caption_text(" ".join(word.text for word in words)),
+                   source_words=[word.index for word in words])
 
 
 def _remap_single_caption(

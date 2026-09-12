@@ -31,7 +31,7 @@ This is the first Minimum Viable Product (MVP) version. It implements:
 - Caption timestamp remapping after cuts
 - JSON analysis/export
 - Basic usable GUI (tkinter)
-- Automated tests (109 passing)
+- Automated tests (111 passing)
 - Clear documentation
 
 ## Requirements
@@ -152,13 +152,32 @@ See `THIRD_PARTY_NOTICES.md` for complete licensing information.
 
 The Resolve AutoCut source code is MIT licensed. Third-party models and libraries retain their original licenses.
 
+## Verification status
+
+The UHM ONNX integration has been exercised against local interview audio. Its
+actual schema is a 16 kHz mono `float32 [1, 480000]` input and a
+`float32 [1, 1499, 6]` softmax output. The pipeline uses contiguous 30-second
+windows (with a padded tail), not one overlapping model invocation per 20 ms.
+
+MLX Whisper 0.4.3 has also been exercised locally using its supported
+`transcribe(..., path_or_hf_repo=..., word_timestamps=True)` API. Resolve
+AutoCut requires timestamped word results and does not invent them from
+segment timings.
+
+The complete pipeline was run on a non-reencoded 60-second stream-copy of the
+gitignored interview sample with the local `tiny` Whisper model. Generated
+FCPXML, SRT, and JSON were parsed and checked programmatically. Manual import
+of that FCPXML into DaVinci Resolve remains required; do not treat it as
+verified until imported in the target Resolve version.
+
 ## Known Limitations
 
 - No B-roll generation
 - No speaker diarization
 - No multicamera editing
-- FCPXML compatibility tested with basic imports
-- Only `base` Whisper model tested extensively
+- DaVinci Resolve GUI import has not yet been manually verified
+- Long full-source runs should be performed locally; the supplied full sample
+  exceeds this session host's single-command execution window
 
 ## Development
 

@@ -152,7 +152,10 @@ class ResolveAutoCut:
                 media_path,
                 audio_path,
                 target_sample_rate=16000,
-                target_channels=1
+                target_channels=1,
+                # NamedTemporaryFile creates an empty path; extraction must
+                # replace it rather than treating it as a cached WAV.
+                force=True,
             )
             
             # Step 4: Detect fillers with UHM
@@ -214,7 +217,7 @@ class ResolveAutoCut:
             if progress_callback:
                 progress_callback({"step": "remapping_captions", "percent": 80})
             
-            remapped_captions = remap_captions(captions, merged_cuts)
+            remapped_captions = remap_captions(captions, merged_cuts, words)
             remapped_captions = reindex_captions(remapped_captions)
             
             logger.info(f"Remapped {len(remapped_captions)} captions to edited timeline")
