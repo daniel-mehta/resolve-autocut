@@ -1,6 +1,8 @@
 """Regression coverage for defects found during the v0.1.0 adversarial audit."""
 
 from fractions import Fraction
+import sys
+import types
 from xml.etree import ElementTree as ET
 import queue
 import threading
@@ -16,7 +18,11 @@ from resolve_autocut.models import (
 )
 from resolve_autocut.gui import AnalysisThread, ResolveAutoCutGUI
 from resolve_autocut.media import FFmpegNotFoundError, inspect_media
-from resolve_autocut.transcription import TranscriptionError, convert_to_words
+from resolve_autocut.transcription import (
+    GUI_WHISPER_MODEL_SIZES, MLX_WHISPER_MODEL_REPOSITORIES,
+    TranscriptionError, WhisperTranscriber, convert_to_words,
+    resolve_whisper_model_repo,
+)
 from resolve_autocut.timeline import (
     generate_fcpxml, get_clip_info, snap_cut_intervals_to_frames, validate_fcpxml,
 )
@@ -44,6 +50,50 @@ def test_default_confidence_uses_upstream_precision_preset():
 def test_invalid_analysis_settings_fail_early(kwargs):
     with pytest.raises(ValueError):
         ResolveAutoCut(**kwargs)
+
+
+@pytest.mark.parametrize(("model_size", "repository"), [
+    ("tiny", "mlx-community/whisper-tiny-mlx"),
+    ("base", "mlx-community/whisper-base-mlx"),
+    ("small", "mlx-community/whisper-small-mlx"),
+    ("medium", "mlx-community/whisper-medium-mlx"),
+])
+def test_supported_whisper_sizes_resolve_to_mlx_repositories(model_size, repository):
+    assert resolve_whisper_model_repo(model_size) == repository
+    assert WhisperTranscriber(model_size).model_repo == repository
+
+
+def test_gui_whisper_choices_are_all_supported_mlx_model_sizes():
+    assert GUI_WHISPER_MODEL_SIZES == tuple(MLX_WHISPER_MODEL_REPOSITORIES)
+    assert all(resolve_whisper_model_repo(choice).endswith("-mlx")
+               for choice in GUI_WHISPER_MODEL_SIZES)
+
+
+def test_explicit_whisper_repository_id_is_preserved():
+    repository = "example-org/private-mlx-whisper"
+    assert resolve_whisper_model_repo(repository) == repository
+    assert WhisperTranscriber(repository).model_repo == repository
+
+
+@pytest.mark.parametrize("model_size", ["", "base.en", "whisper-base", "owner/repo/extra"])
+def test_invalid_whisper_model_name_is_rejected(model_size):
+    with pytest.raises(ValueError, match="Unknown Whisper model"):
+        resolve_whisper_model_repo(model_size)
+
+
+def test_analysis_rejects_unknown_whisper_model_before_running_models():
+    with pytest.raises(ValueError, match="Unknown Whisper model"):
+        ResolveAutoCut(whisper_model="not-a-whisper-model")
+
+
+def test_explicit_repository_authentication_failure_is_preserved(monkeypatch):
+    def reject_private_repo(*args, **kwargs):
+        raise RuntimeError("401 Client Error: Unauthorized for private repository")
+
+    monkeypatch.setitem(sys.modules, "mlx_whisper", types.SimpleNamespace(transcribe=reject_private_repo))
+    with pytest.raises(TranscriptionError, match="401 Client Error: Unauthorized") as exc_info:
+        WhisperTranscriber("example-org/private-mlx-whisper").transcribe("audio.wav")
+    assert isinstance(exc_info.value.__cause__, RuntimeError)
 
 
 def _analysis_with_one_filler() -> AnalysisResult:

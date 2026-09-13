@@ -95,6 +95,20 @@ The first time you run analysis, the application will automatically download:
 Models are cached in `~/.cache/huggingface/hub/`. Review the UHM source-available
 license before use; commercial licensing may be required at scale.
 
+The built-in Whisper choices use public MLX-converted repositories and do not
+require an `HF_TOKEN`:
+
+| Choice | Repository |
+| --- | --- |
+| `tiny` | `mlx-community/whisper-tiny-mlx` |
+| `base` | `mlx-community/whisper-base-mlx` |
+| `small` | `mlx-community/whisper-small-mlx` |
+| `medium` | `mlx-community/whisper-medium-mlx` |
+
+Programmatic callers may instead provide a full Hugging Face repository ID for
+an MLX-compatible model. Private or gated repositories retain Hugging Face's
+normal authentication requirements and errors.
+
 ## How to Launch the Program
 
 ### GUI Mode

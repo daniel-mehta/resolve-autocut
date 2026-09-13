@@ -34,7 +34,7 @@ from .uhm import (
 )
 from .transcription import (
     WhisperTranscriber, convert_to_words, get_full_transcript,
-    TranscriptionError, MLXNotAvailableError
+    TranscriptionError, MLXNotAvailableError, resolve_whisper_model_repo
 )
 from .intervals import (
     sort_intervals, merge_overlapping, invert_intervals,
@@ -95,6 +95,9 @@ class ResolveAutoCut:
             raise ValueError("Invalid filler duration bounds")
         if not whisper_model:
             raise ValueError("Whisper model cannot be empty")
+        # Fail before a potentially lengthy UHM pass for unknown names.  This
+        # still permits an explicit owner/repository ID for advanced callers.
+        resolve_whisper_model_repo(whisper_model)
         self.cut_padding = cut_padding
         self.removable_fillers = set(removable_fillers)
         self.whisper_model = whisper_model

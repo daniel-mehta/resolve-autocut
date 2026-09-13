@@ -23,6 +23,7 @@ import logging
 
 from .app import ResolveAutoCut, AnalysisResult, AnalysisError, AnalysisCancelled
 from .models import FillerDetection, FillerType, Interval
+from .transcription import GUI_WHISPER_MODEL_SIZES
 from .intervals import merge_overlapping, invert_intervals, pad_intervals
 
 
@@ -181,7 +182,7 @@ class ResolveAutoCutGUI:
         model_combo = ttk.Combobox(
             options_frame,
             textvariable=self.whisper_model_var,
-            values=["tiny", "base", "small", "medium"],
+            values=GUI_WHISPER_MODEL_SIZES,
             width=10
         )
         model_combo.grid(row=1, column=1, padx=5, pady=2, sticky=tk.W)

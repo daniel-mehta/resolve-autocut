@@ -1,6 +1,7 @@
 """Local MLX Whisper transcription with required real word timestamps."""
 
 import os
+import re
 import tempfile
 from typing import Any, Dict, List, Optional, Tuple
 import logging
@@ -11,10 +12,44 @@ from .media import extract_audio
 logger = logging.getLogger(__name__)
 DEFAULT_WHISPER_MODEL = "base"
 
+# These are the compact MLX conversions published for the model sizes offered
+# in the GUI.  Keep the GUI choices derived from this mapping rather than
+# reconstructing repository names at call time.
+MLX_WHISPER_MODEL_REPOSITORIES = {
+    "tiny": "mlx-community/whisper-tiny-mlx",
+    "base": "mlx-community/whisper-base-mlx",
+    "small": "mlx-community/whisper-small-mlx",
+    "medium": "mlx-community/whisper-medium-mlx",
+}
+GUI_WHISPER_MODEL_SIZES = tuple(MLX_WHISPER_MODEL_REPOSITORIES)
+_HF_REPOSITORY_ID = re.compile(r"^[^/\s]+/[^/\s]+$")
+
 
 class TranscriptionError(Exception): pass
 class WhisperNotAvailableError(TranscriptionError): pass
 class MLXNotAvailableError(TranscriptionError): pass
+
+
+def resolve_whisper_model_repo(model_size: str) -> str:
+    """Resolve a GUI model size or explicit Hugging Face repository ID.
+
+    Public, application-supported sizes are deliberately mapped explicitly:
+    mlx-whisper expects MLX-converted weights, whose repository names end in
+    ``-mlx``.  Advanced callers may still supply a full ``owner/repository``
+    ID; it is passed through unchanged so Hugging Face can report any genuine
+    access error (for example for a private or gated repository).
+    """
+    if not isinstance(model_size, str):
+        raise ValueError("Whisper model must be a model size or Hugging Face repository ID")
+    if model_size in MLX_WHISPER_MODEL_REPOSITORIES:
+        return MLX_WHISPER_MODEL_REPOSITORIES[model_size]
+    if _HF_REPOSITORY_ID.fullmatch(model_size):
+        return model_size
+    choices = ", ".join(MLX_WHISPER_MODEL_REPOSITORIES)
+    raise ValueError(
+        f"Unknown Whisper model {model_size!r}. Choose one of: {choices}, "
+        "or provide a full Hugging Face repository ID (owner/repository)."
+    )
 
 
 class WhisperTranscriber:
@@ -25,11 +60,12 @@ class WhisperTranscriber:
     """
     def __init__(self, model_size: str = DEFAULT_WHISPER_MODEL):
         self.model_size = model_size
+        self._model_repo = resolve_whisper_model_repo(model_size)
         self._loaded = False
 
     @property
     def model_repo(self) -> str:
-        return self.model_size if "/" in self.model_size else f"mlx-community/whisper-{self.model_size}"
+        return self._model_repo
 
     @property
     def is_loaded(self) -> bool:
