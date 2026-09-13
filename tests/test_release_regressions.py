@@ -16,7 +16,10 @@ from resolve_autocut.captions import generate_captions_from_words, generate_srt,
 from resolve_autocut.models import (
     AnalysisResult, Caption, FillerDetection, FillerType, Interval, MediaInfo, Word,
 )
-from resolve_autocut.gui import AnalysisThread, ResolveAutoCutGUI
+from resolve_autocut.gui import (
+    ABOUT_TEXT, DESERT_ANT_URL, AnalysisThread, ResolveAutoCutGUI,
+    _open_desert_ant_site,
+)
 from resolve_autocut.media import FFmpegNotFoundError, inspect_media
 from resolve_autocut.transcription import (
     GUI_WHISPER_MODEL_SIZES, MLX_WHISPER_MODEL_REPOSITORIES,
@@ -67,6 +70,18 @@ def test_gui_whisper_choices_are_all_supported_mlx_model_sizes():
     assert GUI_WHISPER_MODEL_SIZES == tuple(MLX_WHISPER_MODEL_REPOSITORIES)
     assert all(resolve_whisper_model_repo(choice).endswith("-mlx")
                for choice in GUI_WHISPER_MODEL_SIZES)
+
+
+def test_about_surface_has_version_and_separate_uhm_attribution(monkeypatch):
+    opened = []
+    monkeypatch.setattr("resolve_autocut.gui.webbrowser.open", lambda url, new: opened.append((url, new)))
+
+    assert "Resolve AutoCut v0.1.0" in ABOUT_TEXT
+    assert "Filler detection powered by UHM by Desert Ant Labs." in ABOUT_TEXT
+    assert "Resolve AutoCut-authored source code: MIT License" in ABOUT_TEXT
+    assert "UHM: Desert Ant Labs Source-Available License 1.0" in ABOUT_TEXT
+    _open_desert_ant_site()
+    assert opened == [(DESERT_ANT_URL, 2)]
 
 
 def test_explicit_whisper_repository_id_is_preserved():

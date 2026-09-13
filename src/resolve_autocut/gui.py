@@ -20,6 +20,7 @@ from typing import Optional, Dict, Any, List, Callable
 import threading
 import queue
 import logging
+import webbrowser
 
 from .app import ResolveAutoCut, AnalysisResult, AnalysisError, AnalysisCancelled
 from .models import FillerDetection, FillerType, Interval
@@ -28,6 +29,19 @@ from .intervals import merge_overlapping, invert_intervals, pad_intervals
 
 
 logger = logging.getLogger(__name__)
+
+DESERT_ANT_URL = "https://desertant.com/"
+ABOUT_TEXT = """Resolve AutoCut v0.1.0
+
+Filler detection powered by UHM by Desert Ant Labs.
+
+Resolve AutoCut-authored source code: MIT License
+UHM: Desert Ant Labs Source-Available License 1.0"""
+
+
+def _open_desert_ant_site():
+    """Open the UHM vendor site in the user's default browser."""
+    webbrowser.open(DESERT_ANT_URL, new=2)
 
 
 class GUIError(Exception):
@@ -909,20 +923,22 @@ class ResolveAutoCutGUI:
     
     def _show_about(self):
         """Show about dialog."""
-        about_text = """
-        Resolve AutoCut
-        
-        AI-assisted video cleanup for DaVinci Resolve.
-        Local media inference, Apple Silicon optimized.
-        
-        Version: 0.1.0
-        
-        Filler detection powered by UHM by Desert Ant Labs.
-        Transcription powered by MLX Whisper.
-        
-        MIT License - Copyright (c) 2026 Resolve AutoCut Team
-        """
-        messagebox.showinfo("About Resolve AutoCut", about_text)
+        dialog = tk.Toplevel(self.root)
+        dialog.title("About Resolve AutoCut")
+        dialog.transient(self.root)
+        dialog.resizable(False, False)
+
+        frame = ttk.Frame(dialog, padding=16)
+        frame.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(frame, text=ABOUT_TEXT, justify=tk.LEFT).pack(anchor=tk.W)
+        ttk.Button(
+            frame,
+            text=DESERT_ANT_URL,
+            command=_open_desert_ant_site,
+        ).pack(anchor=tk.W, pady=(10, 0))
+        ttk.Button(frame, text="Close", command=dialog.destroy).pack(
+            anchor=tk.E, pady=(16, 0)
+        )
 
     def _on_close(self):
         """Detach GUI resources and request cooperative worker cancellation."""

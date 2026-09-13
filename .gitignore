@@ -100,3 +100,6 @@ logs/
 *.mp3
 *.m4a
 :memory:.ses
+
+# Local engineering handoff notes
+/HANDOFF.md
