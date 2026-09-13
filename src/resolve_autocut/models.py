@@ -254,10 +254,10 @@ class Caption:
     @staticmethod
     def _format_time(seconds: float) -> str:
         """Format seconds as HH:MM:SS,mmm for SRT."""
-        hours = int(seconds // 3600)
-        minutes = int((seconds % 3600) // 60)
-        secs = int(seconds % 60)
-        millis = int((seconds - int(seconds)) * 1000)
+        total_millis = max(0, int(round(seconds * 1000)))
+        hours, remainder = divmod(total_millis, 3_600_000)
+        minutes, remainder = divmod(remainder, 60_000)
+        secs, millis = divmod(remainder, 1000)
         return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
     
     def to_dict(self) -> Dict[str, Any]:

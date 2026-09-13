@@ -99,3 +99,4 @@ logs/
 *.wav
 *.mp3
 *.m4a
+:memory:.ses

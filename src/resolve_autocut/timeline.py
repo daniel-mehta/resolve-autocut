@@ -1,5 +1,6 @@
 """Frame-aligned, ripple-delete FCPXML 1.9 export."""
 import os
+import math
 from fractions import Fraction
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -37,15 +38,77 @@ def _time(frames: int, rate: Fraction) -> str:
 def _source_uri(path: str) -> str:
     return Path(path).resolve().as_uri()
 
+def _frame_cut_ranges(media: MediaInfo, cuts: List[Interval], rate: Fraction) -> List[Tuple[int, int]]:
+    if rate <= 0:
+        raise TimelineError(f"Invalid frame rate: {rate}")
+    if media.duration < 0:
+        raise TimelineError(f"Invalid media duration: {media.duration}")
+
+    normalized_cuts = merge_overlapping(sort_intervals(cuts))
+    for cut in normalized_cuts:
+        if cut.start < 0 or cut.end > media.duration + 1e-7:
+            raise TimelineError(f"Cut interval outside media duration: {cut}")
+
+    # The source may end partway through its nominal final frame. Keep that
+    # frame rather than silently shortening the asset.
+    total = math.ceil(Fraction(str(media.duration)) * rate)
+
+    # Snap interior cuts inward. Only frames wholly inside a requested cut are
+    # removed, which is the conservative choice for neighboring phonemes.
+    # Cuts touching a source edge may consume the partial edge frame.
+    frame_cuts: List[Tuple[int, int]] = []
+    for cut in normalized_cuts:
+        start_value = Fraction(str(cut.start)) * rate
+        end_value = Fraction(str(cut.end)) * rate
+        start = 0 if cut.start <= 1e-10 else math.ceil(start_value)
+        end = total if cut.end >= media.duration - 1e-10 else math.floor(end_value)
+        start, end = max(0, start), min(total, end)
+        if end > start:
+            frame_cuts.append((start, end))
+
+    merged_cuts: List[Tuple[int, int]] = []
+    for start, end in frame_cuts:
+        if merged_cuts and start <= merged_cuts[-1][1]:
+            merged_cuts[-1] = (merged_cuts[-1][0], max(end, merged_cuts[-1][1]))
+        else:
+            merged_cuts.append((start, end))
+
+    return merged_cuts
+
+
+def snap_cut_intervals_to_frames(
+    media: MediaInfo,
+    cuts: List[Interval],
+    frame_rate: Optional[Fraction] = None,
+) -> List[Interval]:
+    """Return the exact conservative cuts that the FCPXML will apply."""
+    rate = frame_rate or media.frame_rate or Fraction(24)
+    if not isinstance(rate, Fraction):
+        rate = get_frame_rate_fraction(float(rate))
+    return [
+        Interval(float(Fraction(start, 1) / rate),
+                 min(float(Fraction(end, 1) / rate), media.duration))
+        for start, end in _frame_cut_ranges(media, cuts, rate)
+    ]
+
+
 def _frame_intervals(media: MediaInfo, keeps: List[Interval], rate: Fraction) -> List[Tuple[int, int]]:
-    total = seconds_to_frames(media.duration, rate)
-    result = []
-    for keep in merge_overlapping(sort_intervals(keeps)):
+    normalized_keeps = merge_overlapping(sort_intervals(keeps))
+    for keep in normalized_keeps:
         if keep.start < 0 or keep.end > media.duration + 1e-7:
             raise TimelineError(f"Keep interval outside media duration: {keep}")
-        start, end = max(0, seconds_to_frames(keep.start, rate)), min(total, seconds_to_frames(keep.end, rate))
-        if end > start:
-            result.append((start, end))
+    total = math.ceil(Fraction(str(media.duration)) * rate)
+    merged_cuts = _frame_cut_ranges(
+        media, invert_intervals(normalized_keeps, media.duration), rate
+    )
+    result: List[Tuple[int, int]] = []
+    cursor = 0
+    for start, end in merged_cuts:
+        if start > cursor:
+            result.append((cursor, start))
+        cursor = max(cursor, end)
+    if cursor < total:
+        result.append((cursor, total))
     return result
 
 def generate_fcpxml(media_info: MediaInfo, keep_intervals: List[Interval], output_path: str,
@@ -54,16 +117,20 @@ def generate_fcpxml(media_info: MediaInfo, keep_intervals: List[Interval], outpu
     rate = frame_rate or media_info.frame_rate or Fraction(24)
     if not isinstance(rate, Fraction): rate = get_frame_rate_fraction(float(rate))
     clips = _frame_intervals(media_info, keep_intervals, rate)
-    total_frames = seconds_to_frames(media_info.duration, rate)
+    total_frames = math.ceil(Fraction(str(media_info.duration)) * rate)
     retained_frames = sum(end - start for start, end in clips)
     root = ET.Element("fcpxml", {"version": FCPXML_VERSION})
     resources = ET.SubElement(root, "resources")
     ET.SubElement(resources, "format", {"id":"r1", "name":f"ResolveAutoCut {media_info.width or 1920}x{media_info.height or 1080}",
         "frameDuration":_time(1,rate), "width":str(media_info.width or 1920), "height":str(media_info.height or 1080)})
     asset_attrs = {"id":"r2", "name":os.path.basename(media_info.path), "src":_source_uri(media_info.path),
-        "start":"0s", "duration":_time(total_frames,rate), "hasVideo":"1", "format":"r1"}
+        "start":"0s", "duration":_time(total_frames,rate)}
+    if media_info.width or media_info.height or media_info.frame_rate:
+        asset_attrs.update({"hasVideo":"1", "format":"r1"})
     if media_info.sample_rate:
         asset_attrs.update({"hasAudio":"1", "audioSources":"1", "audioChannels":str(media_info.channels or 1), "audioRate":str(media_info.sample_rate)})
+    if "hasVideo" not in asset_attrs and "hasAudio" not in asset_attrs:
+        raise TimelineError("Media has neither a video nor an audio stream")
     ET.SubElement(resources, "asset", asset_attrs)
     library = ET.SubElement(root,"library")
     event = ET.SubElement(library,"event",{"name":"Resolve AutoCut"})
@@ -105,10 +172,54 @@ def validate_fcpxml(fcpxml_path: str) -> Tuple[bool,List[str]]:
     except Exception as exc: return False,[str(exc)]
     errors=[]
     if root.tag != "fcpxml" or root.get("version") != FCPXML_VERSION: errors.append("Not an FCPXML 1.9 document")
-    assets={a.get("id") for a in root.findall("./resources/asset")}
+    formats = {item.get("id"): item for item in root.findall("./resources/format")}
+    asset_elements = root.findall("./resources/asset")
+    assets={a.get("id"): a for a in asset_elements}
+    if not formats: errors.append("Missing format resource")
+    if not assets: errors.append("Missing asset resource")
+    for asset in asset_elements:
+        if not all(asset.get(key) for key in ("id", "name", "src", "duration")):
+            errors.append("Asset missing required attributes")
+        if asset.get("hasVideo") == "1" and asset.get("format") not in formats:
+            errors.append(f"Unknown asset format {asset.get('format')}")
     sequence=root.find(".//sequence")
     if sequence is None: errors.append("Missing sequence")
-    for clip in root.findall(".//asset-clip"):
+    clips = root.findall(".//asset-clip")
+    expected_offset = Fraction(0)
+    retained = Fraction(0)
+    for clip in clips:
         if clip.get("ref") not in assets: errors.append(f"Unknown asset ref {clip.get('ref')}")
-        if not all(clip.get(key) for key in ("offset","start","duration")): errors.append("Clip missing timing")
+        if not all(clip.get(key) for key in ("offset","start","duration")):
+            errors.append("Clip missing timing")
+            continue
+        try:
+            offset = _parse_time(clip.get("offset"))
+            start = _parse_time(clip.get("start"))
+            duration = _parse_time(clip.get("duration"))
+            if duration <= 0: errors.append("Clip has non-positive duration")
+            if offset != expected_offset:
+                errors.append(f"Non-contiguous clip offset {clip.get('offset')}; expected {_fraction_time(expected_offset)}")
+            asset = assets.get(clip.get("ref"))
+            if asset is not None and start + duration > _parse_time(asset.get("duration")):
+                errors.append("Clip exceeds asset duration")
+            expected_offset = offset + duration
+            retained += duration
+        except (TypeError, ValueError, ZeroDivisionError) as exc:
+            errors.append(f"Invalid clip timing: {exc}")
+    if sequence is not None and sequence.get("duration"):
+        try:
+            if _parse_time(sequence.get("duration")) != retained:
+                errors.append("Sequence duration does not equal retained clip duration")
+        except (TypeError, ValueError, ZeroDivisionError) as exc:
+            errors.append(f"Invalid sequence duration: {exc}")
     return not errors,errors
+
+
+def _parse_time(value: str) -> Fraction:
+    if not value or not value.endswith("s"):
+        raise ValueError(f"Invalid FCPXML time {value!r}")
+    return Fraction(value[:-1])
+
+
+def _fraction_time(value: Fraction) -> str:
+    return f"{value.numerator}/{value.denominator}s"

@@ -1,7 +1,7 @@
 [project]
 name = "resolve-autocut"
 version = "0.1.0"
-description = "AI-assisted video cleanup for DaVinci Resolve - local, open-source, Apple Silicon optimized"
+description = "Local AI-assisted video cleanup for DaVinci Resolve workflows on Apple Silicon"
 readme = "README.md"
 requires-python = ">=3.12,<3.14"
 license = {text = "MIT"}
@@ -22,8 +22,7 @@ dependencies = [
     "mlx>=0.12.0",
     "mlx-whisper>=0.4.0",
     
-    # Optional: for audio processing (we primarily use ffmpeg via subprocess)
-    "pydub>=0.25.1",
+    # Audio decoding/resampling for UHM array input
     "scipy>=1.12.0",
     "soundfile>=0.12.1",
 ]

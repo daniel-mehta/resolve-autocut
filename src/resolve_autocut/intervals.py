@@ -259,33 +259,17 @@ def map_timestamp_with_intervals(source_timestamp: float, keep_intervals: List[I
     Returns:
         Timestamp in edited timeline, or None if in removed section
     """
-    # Build a map of keep_intervals with their edited start times
-    # Each keep interval [s1, e1) in source maps to [s2, e2) in edited
-    # where s2 = s1 - sum of cuts before s1
-    # and e2 = e1 - sum of cuts before e1
-    
-    # First, sort keep intervals
-    sorted_keeps = sort_intervals(keep_intervals)
-    
-    # Find which keep interval contains the timestamp
-    for i, keep in enumerate(sorted_keeps):
+    edited_start = 0.0
+    sorted_keeps = merge_overlapping(sort_intervals(keep_intervals))
+    for keep in sorted_keeps:
         if keep.contains(source_timestamp):
-            # Calculate the edited start of this keep interval
-            # It's the source start minus all cuts before it
-            total_cuts_before = 0.0
-            for other_keep in sorted_keeps[:i]:
-                # The gap between keeps is a cut
-                gap_start = other_keep.end
-                gap_end = keep.start
-                total_cuts_before += (gap_end - gap_start)
-            
-            # Actually, this is wrong. Let me recalculate properly.
-            # Better approach: build the mapping from keep intervals
-            pass
-    
-    # Alternative: calculate offset by finding all cuts before the timestamp
-    # This is simpler and more reliable
-    return map_timestamp_simple(source_timestamp, invert_intervals(keep_intervals, float('inf')))
+            return edited_start + source_timestamp - keep.start
+        edited_start += keep.duration
+    # Permit mapping the exact end of the final keep interval (for media-end
+    # boundaries); interior cut starts remain excluded by half-open semantics.
+    if sorted_keeps and abs(source_timestamp - sorted_keeps[-1].end) <= EPSILON:
+        return edited_start
+    return None
 
 
 def map_caption_timestamps(caption: 'Caption', cut_intervals: List[Interval]) -> Optional['Caption']:
@@ -334,38 +318,28 @@ def remap_intervals_to_edited(source_intervals: List[Interval], cut_intervals: L
     Returns:
         List of intervals in edited timeline
     """
-    from .models import Interval as IntervalModel
-    
-    # Build duration map for efficiency
-    duration_map = build_duration_map(cut_intervals)
-    
-    result = []
+    cuts = merge_overlapping(sort_intervals(cut_intervals))
+    result: List[Interval] = []
     for src_interval in source_intervals:
-        # Check if this interval is completely within a cut
-        is_removed = False
-        for cut in cut_intervals:
-            if cut.contains(src_interval.start) and cut.contains(src_interval.end - EPSILON):
-                is_removed = True
-                break
-        
-        if is_removed:
-            continue
-        
-        # Map the endpoints
-        new_start = map_timestamp(src_interval.start, duration_map)
-        new_end = map_timestamp(src_interval.end, duration_map)
-        
-        if new_start is None or new_end is None:
-            # Interval overlaps with a cut - need to split or skip
-            # For simplicity, skip intervals that overlap cuts
-            continue
-        
-        if new_start >= new_end:
-            continue
-            
-        result.append(IntervalModel(start=new_start, end=new_end))
-    
-    return result
+        pieces = [src_interval]
+        for cut in cuts:
+            next_pieces = []
+            for piece in pieces:
+                if not piece.overlaps(cut):
+                    next_pieces.append(piece)
+                    continue
+                if piece.start < cut.start:
+                    next_pieces.append(Interval(piece.start, min(piece.end, cut.start)))
+                if piece.end > cut.end:
+                    next_pieces.append(Interval(max(piece.start, cut.end), piece.end))
+            pieces = next_pieces
+        for piece in pieces:
+            removed_before_start = sum(cut.duration for cut in cuts if cut.end <= piece.start + EPSILON)
+            removed_before_end = sum(cut.duration for cut in cuts if cut.end <= piece.end + EPSILON)
+            mapped = Interval(piece.start - removed_before_start, piece.end - removed_before_end)
+            if mapped.duration > EPSILON:
+                result.append(mapped)
+    return merge_overlapping(result)
 
 
 def validate_intervals(intervals: List[Interval], total_duration: float) -> Tuple[bool, List[str]]:

@@ -47,7 +47,7 @@ def check_ffmpeg() -> bool:
         subprocess.run(["ffprobe", "-version"], 
                       capture_output=True, check=True, timeout=5)
         return True
-    except (subprocess.CalledProcessError, FileNotFoundError):
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
         return False
 
 

@@ -74,7 +74,7 @@ def _result_has_word_timestamps(result: Dict[str, Any]) -> bool:
     return bool(result.get("words")) or any(segment.get("words") for segment in result.get("segments", []))
 
 
-def _convert_to_words(result: Dict[str, Any]) -> List[Word]:
+def convert_to_words(result: Dict[str, Any]) -> List[Word]:
     """Read only timestamped words emitted by Whisper; never interpolate them."""
     raw_words = result.get("words", [])
     if not raw_words:
@@ -106,7 +106,7 @@ def transcribe_media(media_path: str, model_size: str = DEFAULT_WHISPER_MODEL,
         audio_path = extract_audio_to
     try:
         extract_audio(media_path, audio_path, force=True)
-        return _convert_to_words(WhisperTranscriber(model_size).transcribe(audio_path, language=language))
+        return convert_to_words(WhisperTranscriber(model_size).transcribe(audio_path, language=language))
     finally:
         if owns_audio and os.path.exists(audio_path):
             os.unlink(audio_path)
@@ -117,3 +117,7 @@ def transcribe_with_fallback(media_path: str, model_size: str = DEFAULT_WHISPER_
     """Compatibility entry point; MLX is the only supported backend in this MVP."""
     words = transcribe_media(media_path, model_size, language)
     return " ".join(word.text for word in words), words
+
+
+# Backward-compatible private alias for callers from the original scaffold.
+_convert_to_words = convert_to_words

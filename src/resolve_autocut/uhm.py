@@ -2,7 +2,8 @@
 
 UHM accepts one 30 second (480,000 sample) 16 kHz mono window and returns
 ``probs`` shaped ``(1, 1499, 6)``: softmax probabilities every 20 ms.
-Long recordings are split into contiguous windows, not once per output frame.
+Long recordings advance by the 29.98-second output coverage. Adjacent inputs
+therefore share 20 ms of context while their output timelines are contiguous.
 """
 
 import os
@@ -21,6 +22,12 @@ UHM_EXPECTED_SAMPLE_RATE = 16_000
 UHM_WINDOW_SIZE = 30.0
 UHM_WINDOW_SAMPLES = int(UHM_WINDOW_SIZE * UHM_EXPECTED_SAMPLE_RATE)
 UHM_STRIDE = 0.02
+UHM_STRIDE_SAMPLES = int(UHM_STRIDE * UHM_EXPECTED_SAMPLE_RATE)
+# The published model returns 1,499 frames for 30.00 seconds. Advancing by
+# the output coverage (29.98 s) intentionally overlaps 20 ms of input context
+# while keeping output timestamps contiguous and leaving no blind boundary.
+UHM_OUTPUT_FRAMES = 1499
+UHM_HOP_SAMPLES = UHM_OUTPUT_FRAMES * UHM_STRIDE_SAMPLES
 UHM_CLASSES = ["not filler", "uh", "um", "hmm", "and", "other"]
 UHM_CLASS_TO_FILLER = {
     "not filler": FillerType.NOT_FILLER, "uh": FillerType.UH,
@@ -108,16 +115,20 @@ class FillerDetector:
         self.model = model or UHMModel.from_cache()
 
     def detect_from_file(self, audio_path: str, removable_types: set = DEFAULT_REMOVABLE,
-                         confidence_threshold: float = 0.5) -> List[FillerDetection]:
+                         confidence_threshold: float = 0.5,
+                         progress_callback=None) -> List[FillerDetection]:
         import soundfile as sf
         audio, rate = sf.read(audio_path, dtype="float32", always_2d=False)
         if np.ndim(audio) > 1:
             audio = np.mean(audio, axis=1)
-        return self.detect_from_array(audio, rate, removable_types, confidence_threshold)
+        return self.detect_from_array(
+            audio, rate, removable_types, confidence_threshold, progress_callback
+        )
 
     def detect_from_array(self, audio_data: np.ndarray, sample_rate: int,
                           removable_types: set = DEFAULT_REMOVABLE,
-                          confidence_threshold: float = 0.5) -> List[FillerDetection]:
+                          confidence_threshold: float = 0.5,
+                          progress_callback=None) -> List[FillerDetection]:
         audio = np.asarray(audio_data, dtype=np.float32).reshape(-1)
         if sample_rate != UHM_EXPECTED_SAMPLE_RATE:
             from scipy.signal import resample_poly
@@ -125,9 +136,13 @@ class FillerDetector:
             divisor = gcd(sample_rate, UHM_EXPECTED_SAMPLE_RATE)
             audio = resample_poly(audio, UHM_EXPECTED_SAMPLE_RATE // divisor, sample_rate // divisor).astype(np.float32)
         raw: List[Tuple[float, float, int, float]] = []
-        for start_sample in range(0, len(audio), UHM_WINDOW_SAMPLES):
+        starts = range(0, len(audio), UHM_HOP_SAMPLES)
+        total_chunks = max(1, (len(audio) + UHM_HOP_SAMPLES - 1) // UHM_HOP_SAMPLES)
+        for chunk_index, start_sample in enumerate(starts):
             chunk = audio[start_sample:start_sample + UHM_WINDOW_SAMPLES]
             raw.extend(self._detect_chunk(chunk, start_sample / UHM_EXPECTED_SAMPLE_RATE))
+            if progress_callback:
+                progress_callback((chunk_index + 1) / total_chunks)
         return self._process_predictions(raw, removable_types, confidence_threshold)
 
     def _detect_chunk(self, chunk_audio: np.ndarray, chunk_start_time: float) -> List[Tuple[float, float, int, float]]:
@@ -167,10 +182,13 @@ class FillerDetector:
 
 def chunk_audio_for_uhm(audio_data: np.ndarray, sample_rate: int,
                         chunk_size: float = UHM_WINDOW_SIZE) -> List[Tuple[float, float, np.ndarray]]:
-    """Return contiguous model windows; the final short window is padded by ``predict``."""
+    """Return model windows with one output-frame of intentional input overlap."""
     size = int(chunk_size * sample_rate)
+    if size <= 0 or sample_rate <= 0:
+        raise ValueError("sample_rate and chunk_size must be positive")
+    hop = max(1, size - int(UHM_STRIDE * sample_rate))
     return [(start / sample_rate, min(start + size, len(audio_data)) / sample_rate, audio_data[start:start + size])
-            for start in range(0, len(audio_data), size)]
+            for start in range(0, len(audio_data), hop)]
 
 
 def detect_fillers(audio_path: str, removable_types: set = DEFAULT_REMOVABLE,

@@ -21,7 +21,7 @@ import threading
 import queue
 import logging
 
-from .app import ResolveAutoCut, AnalysisResult, AnalysisError
+from .app import ResolveAutoCut, AnalysisResult, AnalysisError, AnalysisCancelled
 from .models import FillerDetection, FillerType, Interval
 from .intervals import merge_overlapping, invert_intervals, pad_intervals
 
@@ -49,20 +49,29 @@ class AnalysisThread(threading.Thread):
         self.progress_queue = progress_queue
         self.result = None
         self.error = None
+        self.cancelled = False
+        self.cancel_event = threading.Event()
         self.daemon = True
     
     def run(self):
         """Run the analysis."""
         try:
             def progress_callback(progress):
+                if self.cancel_event.is_set():
+                    raise AnalysisCancelled("Analysis cancelled")
                 self.progress_queue.put(progress)
             
             self.result = self.app.analyze(
                 self.media_path,
                 progress_callback=progress_callback
             )
+        except AnalysisCancelled:
+            self.cancelled = True
         except Exception as e:
             self.error = str(e)
+
+    def cancel(self):
+        self.cancel_event.set()
 
 
 class ResolveAutoCutGUI:
@@ -77,6 +86,7 @@ class ResolveAutoCutGUI:
         self.root = root
         self.root.title("Resolve AutoCut")
         self.root.geometry("1200x800")
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         
         # Application state
         self.app = ResolveAutoCut()
@@ -88,7 +98,7 @@ class ResolveAutoCutGUI:
         # Configuration
         self.cut_padding_var = DoubleVar(value=0.05)
         self.whisper_model_var = StringVar(value="base")
-        self.confidence_threshold_var = DoubleVar(value=0.5)
+        self.confidence_threshold_var = DoubleVar(value=0.75)
         
         # Create UI
         self._create_widgets()
@@ -139,13 +149,16 @@ class ResolveAutoCutGUI:
         file_label = ttk.Label(file_frame, text="Selected file:")
         file_label.pack(side=tk.LEFT, padx=5, pady=5)
         
-        self.file_entry = ttk.Entry(file_frame, textvariable=self.file_path_var, width=80)
+        self.file_entry = ttk.Entry(
+            file_frame, textvariable=self.file_path_var, width=80, state="readonly"
+        )
         self.file_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5, pady=5)
         
         browse_btn = ttk.Button(
             file_frame, text="Browse...", command=self._browse_file
         )
         browse_btn.pack(side=tk.RIGHT, padx=5, pady=5)
+        self.browse_btn = browse_btn
         
         # Options frame
         options_frame = ttk.LabelFrame(frame, text="Options")
@@ -157,6 +170,9 @@ class ResolveAutoCutGUI:
         
         padding_entry = ttk.Entry(options_frame, textvariable=self.cut_padding_var, width=10)
         padding_entry.grid(row=0, column=1, padx=5, pady=2, sticky=tk.W)
+        padding_entry.bind("<Return>", self._apply_padding)
+        padding_entry.bind("<FocusOut>", self._apply_padding)
+        self.padding_entry = padding_entry
         
         # Whisper model
         model_label = ttk.Label(options_frame, text="Whisper Model:")
@@ -170,6 +186,7 @@ class ResolveAutoCutGUI:
         )
         model_combo.grid(row=1, column=1, padx=5, pady=2, sticky=tk.W)
         model_combo.current(1)  # Default to "base"
+        self.model_combo = model_combo
         
         # Confidence threshold
         conf_label = ttk.Label(options_frame, text="Min Confidence:")
@@ -177,6 +194,7 @@ class ResolveAutoCutGUI:
         
         conf_entry = ttk.Entry(options_frame, textvariable=self.confidence_threshold_var, width=10)
         conf_entry.grid(row=2, column=1, padx=5, pady=2, sticky=tk.W)
+        self.conf_entry = conf_entry
         
         # Media info
         info_frame = ttk.LabelFrame(frame, text="Media Information")
@@ -414,7 +432,7 @@ class ResolveAutoCutGUI:
         file_menu = tk.Menu(menubar, tearoff=0)
         file_menu.add_command(label="Open...", command=self._browse_file)
         file_menu.add_separator()
-        file_menu.add_command(label="Exit", command=self.root.quit)
+        file_menu.add_command(label="Exit", command=self._on_close)
         menubar.add_cascade(label="File", menu=file_menu)
         
         # Options menu
@@ -436,27 +454,28 @@ class ResolveAutoCutGUI:
         """Setup logging to the GUI."""
         # Create a custom handler
         class GUIHandler(logging.Handler):
-            def __init__(self, text_widget):
+            def __init__(self, message_queue):
                 super().__init__()
-                self.text_widget = text_widget
+                self.message_queue = message_queue
             
             def emit(self, record):
                 try:
                     msg = self.format(record)
-                    self.text_widget.insert(tk.END, msg + "\n")
-                    self.text_widget.see(tk.END)
-                    self.text_widget.update()
+                    self.message_queue.put({"_log": msg})
                 except Exception:
                     pass
         
         # Add handler
-        gui_handler = GUIHandler(self.log_text)
+        gui_handler = GUIHandler(self.progress_queue)
         gui_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
         logging.getLogger().addHandler(gui_handler)
         logging.getLogger().setLevel(logging.INFO)
+        self._gui_log_handler = gui_handler
     
     def _browse_file(self):
         """Open file dialog to select media file."""
+        if self.analysis_thread and self.analysis_thread.is_alive():
+            return
         filetypes = [
             ("Video Files", "*.mp4 *.mov *.avi *.mkv"),
             ("Audio Files", "*.wav *.mp3 *.m4a *.aac"),
@@ -481,6 +500,8 @@ class ResolveAutoCutGUI:
     
     def _start_analysis(self):
         """Start the analysis thread."""
+        if self.analysis_thread and self.analysis_thread.is_alive():
+            return
         if not self.media_path:
             messagebox.showerror("Error", "Please select a media file first")
             return
@@ -495,12 +516,29 @@ class ResolveAutoCutGUI:
         self.progress_bar["value"] = 0
         
         # Update app configuration
-        self.app.cut_padding = self.cut_padding_var.get()
-        self.app.confidence_threshold = self.confidence_threshold_var.get()
+        try:
+            padding = self.cut_padding_var.get()
+            confidence = self.confidence_threshold_var.get()
+        except tk.TclError:
+            messagebox.showerror("Error", "Padding and confidence must be numbers")
+            self._set_analyzing_state(False)
+            return
+        if padding < 0 or not 0 <= confidence <= 1:
+            messagebox.showerror(
+                "Error", "Padding must be non-negative and confidence must be between 0 and 1"
+            )
+            self._set_analyzing_state(False)
+            return
+        self.app.set_cut_padding(padding)
+        self.app.confidence_threshold = confidence
         self.app.whisper_model = self.whisper_model_var.get()
         
         # Start analysis thread
-        self.progress_queue = queue.Queue()
+        while True:
+            try:
+                self.progress_queue.get_nowait()
+            except queue.Empty:
+                break
         self.analysis_thread = AnalysisThread(
             self.app, self.media_path, self.progress_queue
         )
@@ -512,15 +550,17 @@ class ResolveAutoCutGUI:
     def _cancel_analysis(self):
         """Cancel the current analysis."""
         if self.analysis_thread and self.analysis_thread.is_alive():
-            # Note: Threads can't be forcibly stopped in Python
-            # We just update the UI state
-            self._set_analyzing_state(False)
-            self.progress_var.set("Analysis cancelled")
+            self.analysis_thread.cancel()
+            self.cancel_btn["state"] = tk.DISABLED
+            self.progress_var.set("Cancellation requested; waiting for current model step...")
     
     def _check_analysis_complete(self):
         """Check if analysis thread has completed."""
         if self.analysis_thread and not self.analysis_thread.is_alive():
-            if self.analysis_thread.error:
+            if self.analysis_thread.cancelled:
+                self._set_analyzing_state(False)
+                self.progress_var.set("Analysis cancelled")
+            elif self.analysis_thread.error:
                 self._set_analyzing_state(False)
                 messagebox.showerror(
                     "Analysis Error",
@@ -541,6 +581,11 @@ class ResolveAutoCutGUI:
         """Set the analyzing state and update UI."""
         self.analyze_btn["state"] = tk.DISABLED if analyzing else tk.NORMAL
         self.cancel_btn["state"] = tk.NORMAL if analyzing else tk.DISABLED
+        self.browse_btn["state"] = tk.DISABLED if analyzing else tk.NORMAL
+        option_state = tk.DISABLED if analyzing else tk.NORMAL
+        self.padding_entry["state"] = option_state
+        self.model_combo["state"] = "disabled" if analyzing else "readonly"
+        self.conf_entry["state"] = option_state
         self._update_export_button_states()
     
     def _check_progress(self):
@@ -548,6 +593,10 @@ class ResolveAutoCutGUI:
         try:
             while True:
                 progress = self.progress_queue.get_nowait()
+                if "_log" in progress:
+                    self.log_text.insert(tk.END, progress["_log"] + "\n")
+                    self.log_text.see(tk.END)
+                    continue
                 if "percent" in progress:
                     self.progress_bar["value"] = progress["percent"]
                 if "step" in progress:
@@ -624,6 +673,7 @@ class ResolveAutoCutGUI:
             self.detections_tree.insert(
                 "",
                 tk.END,
+                iid=str(i),
                 values=(
                     "Yes" if detection.enabled else "No",
                     f"{detection.start:.3f}",
@@ -645,8 +695,10 @@ class ResolveAutoCutGUI:
     
     def _toggle_detection_enabled(self, event):
         """Toggle enabled state for a detection."""
-        item = self.detections_tree.selection()[0]
-        values = self.detections_tree.item(item, "values")
+        selection = self.detections_tree.selection()
+        if not selection or self.analysis is None:
+            return
+        item = selection[0]
         index = int(item)
         
         # Find the detection
@@ -667,7 +719,7 @@ class ResolveAutoCutGUI:
     
     def _enable_all_detections(self):
         """Enable all detections."""
-        if self.analysis is None:
+        if self.analysis is None or not self.analysis.filler_detections:
             return
         
         for det in self.analysis.filler_detections:
@@ -681,7 +733,7 @@ class ResolveAutoCutGUI:
     
     def _disable_all_detections(self):
         """Disable all detections."""
-        if self.analysis is None:
+        if self.analysis is None or not self.analysis.filler_detections:
             return
         
         for det in self.analysis.filler_detections:
@@ -710,7 +762,8 @@ class ResolveAutoCutGUI:
         """Update state when media file changes."""
         # Clear previous analysis
         self.analysis = None
-        self._last_analysis = None
+        self.app._last_analysis = None
+        self.base_filename_var.set("")
         
         # Clear UI
         self.media_info_text.delete(1.0, tk.END)
@@ -826,7 +879,23 @@ class ResolveAutoCutGUI:
         """Show dialog to set cut padding."""
         # Simple approach: just update the variable
         # Could add a proper dialog if needed
-        pass
+        self.padding_entry.focus_set()
+        self.padding_entry.selection_range(0, tk.END)
+
+    def _apply_padding(self, event=None):
+        """Apply edited padding to existing review state without re-analysis."""
+        try:
+            padding = self.cut_padding_var.get()
+            if padding < 0:
+                raise ValueError
+        except (tk.TclError, ValueError):
+            messagebox.showerror("Error", "Cut padding must be a non-negative number")
+            return
+        if self.analysis is not None:
+            self.analysis = self.app.update_cut_padding(self.analysis, padding)
+            self._update_after_analysis()
+        else:
+            self.app.set_cut_padding(padding)
     
     def _sort_column(self, col, reverse):
         """Sort treeview by column."""
@@ -843,7 +912,7 @@ class ResolveAutoCutGUI:
         Resolve AutoCut
         
         AI-assisted video cleanup for DaVinci Resolve.
-        Local, open-source, Apple Silicon optimized.
+        Local media inference, Apple Silicon optimized.
         
         Version: 0.1.0
         
@@ -853,6 +922,15 @@ class ResolveAutoCutGUI:
         MIT License - Copyright (c) 2026 Resolve AutoCut Team
         """
         messagebox.showinfo("About Resolve AutoCut", about_text)
+
+    def _on_close(self):
+        """Detach GUI resources and request cooperative worker cancellation."""
+        if self.analysis_thread and self.analysis_thread.is_alive():
+            self.analysis_thread.cancel()
+        handler = getattr(self, "_gui_log_handler", None)
+        if handler is not None:
+            logging.getLogger().removeHandler(handler)
+        self.root.destroy()
 
 
 def run_gui():

@@ -551,6 +551,19 @@ class TestRemapIntervalsToEdited:
         
         assert len(remapped) == 0
 
+    def test_remap_interval_starting_inside_cut(self):
+        remapped = remap_intervals_to_edited(
+            [Interval(start=5.5, end=7.0)], [Interval(start=5.0, end=6.0)]
+        )
+        assert remapped == [Interval(start=5.0, end=6.0)]
+
+    def test_remap_interval_spanning_multiple_cuts(self):
+        remapped = remap_intervals_to_edited(
+            [Interval(start=1.0, end=9.0)],
+            [Interval(start=2.0, end=3.0), Interval(start=5.0, end=7.0)],
+        )
+        assert remapped == [Interval(start=1.0, end=6.0)]
+
 
 class TestFramesAndSeconds:
     """Tests for frame/second conversions."""

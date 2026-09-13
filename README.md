@@ -2,17 +2,19 @@
 
 **AI-assisted video cleanup for DaVinci Resolve**
 
-Local, open-source, Apple Silicon optimized.
+Local media inference, optimized for Apple Silicon.
 
 ## Overview
 
 Resolve AutoCut is a macOS application that analyzes video/audio files to detect and remove filler words ("uh", "um", "hmm") automatically. It generates:
 
-- An **FCPXML timeline** that can be imported directly into DaVinci Resolve
+- An **FCPXML timeline** intended for import into DaVinci Resolve
 - **SRT subtitles** with timestamps adjusted to match the edited timeline
 - **JSON analysis** for audit and reproducibility
 
-The application runs entirely locally on your Mac - no cloud APIs, no watermarks, no paid services.
+Interview media, extracted audio, transcripts, and analysis remain local. No
+interview content is uploaded to a cloud inference service. Internet access may
+be required to install dependencies and download model files.
 
 ## Current MVP Status
 
@@ -26,26 +28,25 @@ This is the first Minimum Viable Product (MVP) version. It implements:
 - Proposed filler review with enable/disable controls
 - Cut interval generation with configurable padding
 - Conservative cut padding (default 50ms)
-- Resolve-compatible FCPXML timeline export
+- Frame-aligned, ripple-delete FCPXML 1.9 timeline export (manual Resolve import validation pending)
 - Editable SRT caption export
 - Caption timestamp remapping after cuts
 - JSON analysis/export
 - Basic usable GUI (tkinter)
-- Automated tests (111 passing)
+- Automated invariant and regression tests
 - Clear documentation
 
 ## Requirements
 
 ### Hardware
 
-- **macOS** (tested on macOS with Apple Silicon)
-- **Apple Silicon M1/M2/M3** or Intel Mac (Apple Silicon recommended for MLX)
+- **macOS with Apple Silicon (M1 or newer)**
 - **32 GB RAM** recommended for longer videos
 - **10 GB free disk space** for model caching
 
 ### Software
 
-- **Python 3.12** (required)
+- **Python 3.12 or 3.13**
 - **FFmpeg / FFprobe** (required)
 - **uv** (recommended for dependency management)
 
@@ -58,7 +59,6 @@ See `pyproject.toml` for the full list. Key dependencies:
 - `huggingface-hub` - For downloading UHM model
 - `mlx` + `mlx-whisper` - For Apple Silicon-optimized transcription
 - `scipy` + `soundfile` - Audio processing
-- `pydub` - Optional audio manipulation
 - `tkinter` - GUI (included with Python)
 
 ## Installation
@@ -66,18 +66,18 @@ See `pyproject.toml` for the full list. Key dependencies:
 ### Quick Start with uv
 
 ```bash
-git clone https://github.com/your-org/resolve-autocut.git
+git clone https://github.com/daniel-mehta/resolve-autocut.git
 cd resolve-autocut
 uv venv --python 3.12
 source .venv/bin/activate
-uv pip install -e .
+uv sync --all-extras --locked
 brew install ffmpeg
 ```
 
 ### Without uv (using pip)
 
 ```bash
-git clone https://github.com/your-org/resolve-autocut.git
+git clone https://github.com/daniel-mehta/resolve-autocut.git
 cd resolve-autocut
 python3.12 -m venv .venv
 source .venv/bin/activate
@@ -89,17 +89,18 @@ brew install ffmpeg
 
 The first time you run analysis, the application will automatically download:
 
-1. **UHM model** (`uhm-web-fp16.onnx`) from Hugging Face Hub (~80 MB)
+1. **UHM model** (`uhm-web-fp16.onnx`) from Hugging Face Hub (~51 MB)
 2. **MLX Whisper model** (default: `base`) from Hugging Face (~140 MB)
 
-Models are cached in `~/.cache/huggingface/hub/`. You may need to accept licenses on first use.
+Models are cached in `~/.cache/huggingface/hub/`. Review the UHM source-available
+license before use; commercial licensing may be required at scale.
 
 ## How to Launch the Program
 
 ### GUI Mode
 
 ```bash
-python -m resolve_autocut.gui
+uv run python -m resolve_autocut.gui
 ```
 
 ### Command-Line Mode
@@ -118,7 +119,7 @@ result = run_analysis_pipeline(
 ## How to Use (GUI)
 
 1. **Select Media File**: Click "Browse" to select your video or audio file
-2. **Configure Options**: Adjust cut padding, whisper model, confidence threshold
+2. **Configure Options**: Adjust cut padding, Whisper model, and confidence threshold (default 0.75)
 3. **Click "Analyze"**: Wait for processing to complete
 4. **Review Detections**: Enable/disable individual cuts in the Review tab
 5. **Export Results**: Export FCPXML, SRT, and JSON files
@@ -132,10 +133,10 @@ result = run_analysis_pipeline(
 
 ## Privacy
 
-- All processing happens on your Mac
-- No data leaves your machine
-- No cloud APIs
-- No watermarks
+- Interview media, extracted audio, transcripts, and analysis stay on your Mac
+- No interview content is sent to a cloud inference API
+- Dependency and model downloads contact package registries and Hugging Face
+- Generated JSON includes the local source-media path; exports are gitignored under `outputs/`
 
 ## UHM Attribution
 
@@ -156,19 +157,24 @@ The Resolve AutoCut source code is MIT licensed. Third-party models and librarie
 
 The UHM ONNX integration has been exercised against local interview audio. Its
 actual schema is a 16 kHz mono `float32 [1, 480000]` input and a
-`float32 [1, 1499, 6]` softmax output. The pipeline uses contiguous 30-second
-windows (with a padded tail), not one overlapping model invocation per 20 ms.
+`float32 [1, 1499, 6]` softmax output. The pipeline advances each 30-second
+input by its 29.98-second output coverage (20 ms of shared input context), with
+a padded tail; it does not invoke the model once per output frame.
 
 MLX Whisper 0.4.3 has also been exercised locally using its supported
 `transcribe(..., path_or_hf_repo=..., word_timestamps=True)` API. Resolve
 AutoCut requires timestamped word results and does not invent them from
 segment timings.
 
-The complete pipeline was run on a non-reencoded 60-second stream-copy of the
-gitignored interview sample with the local `tiny` Whisper model. Generated
-FCPXML, SRT, and JSON were parsed and checked programmatically. Manual import
-of that FCPXML into DaVinci Resolve remains required; do not treat it as
-verified until imported in the target Resolve version.
+The complete pipeline was run on both a non-reencoded 60-second excerpt and the
+full 1,913.024-second gitignored interview sample with the real UHM ONNX model
+and local MLX Whisper `tiny`. The full validation produced 6 conservative
+0.75-threshold detections, 5,362 timestamped words, 702 captions, and 6 cuts.
+The padded proposals span 4.98 seconds; conservative alignment removes 73
+complete 16 fps frames (4.5625 seconds). Generated XML, SRT, and JSON passed
+programmatic invariant checks against the same snapped cuts. Manual import into
+the target DaVinci Resolve version remains required; FCPXML generation is
+verified, Resolve acceptance is not.
 
 ## Known Limitations
 
@@ -176,17 +182,17 @@ verified until imported in the target Resolve version.
 - No speaker diarization
 - No multicamera editing
 - DaVinci Resolve GUI import has not yet been manually verified
-- Long full-source runs should be performed locally; the supplied full sample
-  exceeds this session host's single-command execution window
+- GUI cancellation is cooperative between model steps; an in-progress Whisper
+  call cannot be interrupted safely
 
 ## Development
 
 ```bash
 # Run tests
-python -m pytest tests/ -v
+uv run python -m pytest
 
 # Run specific test
-python -m pytest tests/test_intervals.py -v
+uv run python -m pytest tests/test_intervals.py -v
 ```
 
 ## Project Structure

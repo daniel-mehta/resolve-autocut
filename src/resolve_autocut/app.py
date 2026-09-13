@@ -33,7 +33,7 @@ from .uhm import (
     UHMError, ModelDownloadError
 )
 from .transcription import (
-    WhisperTranscriber, transcribe_media, transcribe_with_fallback,
+    WhisperTranscriber, convert_to_words, get_full_transcript,
     TranscriptionError, MLXNotAvailableError
 )
 from .intervals import (
@@ -45,7 +45,9 @@ from .captions import (
     generate_captions_from_words, remap_captions, generate_srt,
     save_srt, reindex_captions
 )
-from .timeline import generate_fcpxml, generate_fcpxml_from_analysis
+from .timeline import (
+    generate_fcpxml, generate_fcpxml_from_analysis, snap_cut_intervals_to_frames,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -54,6 +56,10 @@ logger = logging.getLogger(__name__)
 class AnalysisError(Exception):
     """Exception raised for analysis pipeline errors."""
     pass
+
+
+class AnalysisCancelled(AnalysisError):
+    """Raised when a caller requests cooperative pipeline cancellation."""
 
 
 class ResolveAutoCut:
@@ -67,7 +73,7 @@ class ResolveAutoCut:
         cut_padding: float = 0.05,
         removable_fillers: set = DEFAULT_REMOVABLE_FILLERS,
         whisper_model: str = "base",
-        confidence_threshold: float = 0.5,
+        confidence_threshold: float = 0.75,
         min_filler_duration: float = 0.1,
         max_filler_duration: float = 5.0
     ):
@@ -81,8 +87,16 @@ class ResolveAutoCut:
             min_filler_duration: Minimum duration for a filler detection
             max_filler_duration: Maximum duration for a filler detection
         """
+        if cut_padding < 0:
+            raise ValueError("Cut padding cannot be negative")
+        if not 0 <= confidence_threshold <= 1:
+            raise ValueError("Confidence threshold must be between 0 and 1")
+        if min_filler_duration < 0 or max_filler_duration < min_filler_duration:
+            raise ValueError("Invalid filler duration bounds")
+        if not whisper_model:
+            raise ValueError("Whisper model cannot be empty")
         self.cut_padding = cut_padding
-        self.removable_fillers = removable_fillers
+        self.removable_fillers = set(removable_fillers)
         self.whisper_model = whisper_model
         self.confidence_threshold = confidence_threshold
         self.min_filler_duration = min_filler_duration
@@ -162,7 +176,13 @@ class ResolveAutoCut:
             if progress_callback:
                 progress_callback({"step": "detecting_fillers", "percent": 15})
             
-            filler_detections = self._detect_fillers(audio_path)
+            filler_detections = self._detect_fillers(
+                audio_path,
+                (lambda fraction: progress_callback({
+                    "step": "detecting_fillers",
+                    "percent": 15 + 15 * fraction,
+                })) if progress_callback else None,
+            )
             logger.info(f"Detected {len(filler_detections)} filler regions")
             
             # Filter detections
@@ -206,7 +226,9 @@ class ResolveAutoCut:
                 cut_intervals.append(interval)
             
             # Merge overlapping cuts
-            merged_cuts = merge_overlapping(cut_intervals)
+            merged_cuts = snap_cut_intervals_to_frames(
+                media_info, merge_overlapping(cut_intervals)
+            )
             
             # Calculate keep intervals
             keep_intervals = invert_intervals(merged_cuts, media_info.duration)
@@ -261,7 +283,7 @@ class ResolveAutoCut:
                 except Exception:
                     pass
     
-    def _detect_fillers(self, audio_path: str) -> List[FillerDetection]:
+    def _detect_fillers(self, audio_path: str, progress_callback=None) -> List[FillerDetection]:
         """Detect fillers using UHM.
         
         Args:
@@ -278,10 +300,13 @@ class ResolveAutoCut:
             detections = detector.detect_from_file(
                 audio_path,
                 removable_types=self.removable_fillers,
-                confidence_threshold=self.confidence_threshold
+                confidence_threshold=self.confidence_threshold,
+                progress_callback=progress_callback,
             )
             return detections
             
+        except AnalysisCancelled:
+            raise
         except Exception as e:
             logger.error(f"Filler detection failed: {e}")
             raise AnalysisError(f"Filler detection failed: {e}")
@@ -296,10 +321,13 @@ class ResolveAutoCut:
             Tuple of (full_transcript, list_of_words)
         """
         try:
-            return transcribe_with_fallback(
-                audio_path,
-                model_size=self.whisper_model
-            )
+            if (self._whisper_transcriber is None or
+                    self._whisper_transcriber.model_size != self.whisper_model):
+                self._whisper_transcriber = WhisperTranscriber(self.whisper_model)
+            result = self._whisper_transcriber.transcribe(audio_path)
+            return get_full_transcript(result), convert_to_words(result)
+        except AnalysisCancelled:
+            raise
         except Exception as e:
             logger.error(f"Transcription failed: {e}")
             raise AnalysisError(f"Transcription failed: {e}")
@@ -428,9 +456,9 @@ class ResolveAutoCut:
         Returns:
             Updated AnalysisResult
         """
-        if 0 <= detection_index < len(analysis.filler_detections):
-            det = analysis.filler_detections[detection_index]
-            det.enabled = enabled
+        if not 0 <= detection_index < len(analysis.filler_detections):
+            raise IndexError(f"Detection index out of range: {detection_index}")
+        analysis.filler_detections[detection_index].enabled = enabled
         
         # Recalculate cut intervals
         cut_intervals = []
@@ -440,14 +468,19 @@ class ResolveAutoCut:
                 interval = padded.interval.clamp(0, analysis.media_info.duration)
                 cut_intervals.append(interval)
         
-        merged_cuts = merge_overlapping(cut_intervals)
+        merged_cuts = snap_cut_intervals_to_frames(
+            analysis.media_info, merge_overlapping(cut_intervals)
+        )
         keep_intervals = invert_intervals(merged_cuts, analysis.media_info.duration)
         
         analysis.approved_cut_intervals = merged_cuts
         analysis.keep_intervals = keep_intervals
         
-        # Remap captions
-        analysis.captions = remap_captions(analysis.captions, merged_cuts)
+        # Always rebuild source-timeline captions from the immutable word
+        # timestamps. Remapping already-edited captions compounds offsets and
+        # cannot restore words when a cut is disabled.
+        source_captions = generate_captions_from_words(analysis.words)
+        analysis.captions = remap_captions(source_captions, merged_cuts, analysis.words)
         analysis.captions = reindex_captions(analysis.captions)
         
         return analysis
@@ -458,7 +491,23 @@ class ResolveAutoCut:
         Args:
             padding: New padding value in seconds
         """
+        if padding < 0:
+            raise ValueError("Cut padding cannot be negative")
         self.cut_padding = padding
+
+    def update_cut_padding(self, analysis: AnalysisResult, padding: float) -> AnalysisResult:
+        """Apply a new padding value and deterministically rebuild edit state."""
+        self.set_cut_padding(padding)
+        analysis.cut_padding = padding
+        if analysis.filler_detections:
+            return self.update_detection_enabled(
+                analysis, 0, analysis.filler_detections[0].enabled
+            )
+
+        analysis.approved_cut_intervals = []
+        analysis.keep_intervals = invert_intervals([], analysis.media_info.duration)
+        analysis.captions = reindex_captions(generate_captions_from_words(analysis.words))
+        return analysis
 
 
 def run_analysis_pipeline(

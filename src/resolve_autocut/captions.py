@@ -11,7 +11,8 @@ from typing import List, Optional, Dict, Any
 from .models import Word, Caption, Interval
 from .intervals import (
     sort_intervals, merge_overlapping, invert_intervals,
-    map_timestamp_simple, build_duration_map, calculate_removed_before
+    map_timestamp_simple, build_duration_map, calculate_removed_before,
+    remap_intervals_to_edited,
 )
 
 
@@ -173,7 +174,21 @@ def remap_captions(captions: List[Caption], cut_intervals: List[Interval], words
             run = []
             for index in caption.source_words:
                 word = by_index.get(index)
-                kept = word is not None and not any(word.start < cut.end and word.end > cut.start for cut in cuts)
+                overlaps = word is not None and any(
+                    word.start < cut.end and word.end > cut.start for cut in cuts
+                )
+                fully_removed = word is not None and any(
+                    word.start >= cut.start - 1e-9 and word.end <= cut.end + 1e-9
+                    for cut in cuts
+                )
+                normalized_text = (
+                    "" if word is None else
+                    word.text.strip().lower().strip(".,!?;:\"'()[]{}")
+                )
+                is_lexical_filler = normalized_text in {"uh", "um", "hmm"}
+                kept = word is not None and not (
+                    fully_removed or (overlaps and is_lexical_filler)
+                )
                 if kept:
                     run.append(word)
                 elif run:
@@ -196,16 +211,12 @@ def remap_captions(captions: List[Caption], cut_intervals: List[Interval], words
 
 
 def _caption_from_kept_words(index: int, words: List[Word], cuts: List[Interval]) -> Caption:
-    start = map_timestamp_simple(words[0].start, cuts)
-    end = map_timestamp_simple(words[-1].end, cuts)
-    # Half-open cuts include their start but a kept word may legitimately end
-    # exactly there.  Map that boundary to the beginning of the ripple gap.
-    if end is None:
-        for cut in cuts:
-            if abs(words[-1].end - cut.start) < 1e-9:
-                end = cut.start - sum(previous.duration for previous in cuts if previous.end <= cut.start)
-                break
-    assert start is not None and end is not None
+    mapped = remap_intervals_to_edited(
+        [Interval(words[0].start, words[-1].end)], cuts
+    )
+    if not mapped:
+        raise ValueError("Kept caption words have no retained audio")
+    start, end = mapped[0].start, mapped[-1].end
     return Caption(index=index, start=start, end=end,
                    text=_clean_caption_text(" ".join(word.text for word in words)),
                    source_words=[word.index for word in words])
@@ -333,8 +344,9 @@ def generate_srt(captions: List[Caption]) -> str:
         SRT format string
     """
     srt_lines = []
-    for caption in captions:
-        srt_lines.append(caption.to_srt())
+    valid_captions = [caption for caption in captions if caption.end > caption.start]
+    for index, caption in enumerate(valid_captions, start=1):
+        srt_lines.append(caption.to_srt(index=index))
     return "".join(srt_lines)
 
 
@@ -346,6 +358,8 @@ def save_srt(captions: List[Caption], file_path: str) -> None:
         file_path: Path to save the SRT file
     """
     srt_content = generate_srt(captions)
+    import os
+    os.makedirs(os.path.dirname(file_path) or ".", exist_ok=True)
     with open(file_path, 'w', encoding='utf-8') as f:
         f.write(srt_content)
 
